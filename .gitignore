@@ -1,0 +1,18 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+venv/
+*.env
+*.egg
+*.egg-info
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Config
+*.json
