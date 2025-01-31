@@ -2,6 +2,7 @@ import PyPDF2
 import streamlit as st
 from groq import Groq
 import os
+import datetime
 import json
 import re
 import pytesseract
@@ -13,6 +14,7 @@ import numpy as np
 from dotenv import load_dotenv
 import docx
 import io
+import tabula
 
 # Streamlit page configuration
 st.set_page_config(
@@ -79,12 +81,28 @@ def clean_extracted_text(text):
 
     return text.strip()
 
+
+def extract_tables(file):
+    with open("temp.pdf", "wb") as f:
+        f.write(file.getbuffer())  # Save uploaded file temporarily
+
+    # Extract tables from the PDF
+    tables = tabula.read_pdf("temp.pdf", pages="all", multiple_tables=True)
+
+    if tables:
+        for i, table in enumerate(tables):
+            st.write(f"### Table {i+1}")
+            st.dataframe(table)
+    else:
+        st.write("No tables were found in the PDF.")
+    return tables
+
 def standardize_financial_terms(terms):
     """Maps financial terms to standard formats for easier searching."""
     term_mapping = {
         "revenue": ["revenue", "total revenue", "net revenue", "turnover"],
         "pat": ["pat", "profit after tax", "net profit", "net earnings"],
-        "ebitda": ["ebitda", "operating profit", "earnings before interest, tax, depreciation"],
+        "ebitda": ["ebitda", "earnings before interest, tax, depreciation"],
         "eps": ["eps", "earnings per share", "basic eps", "diluted eps"],
         "dividend": ["dividend", "dividends declared", "dividend payout"],
     }
@@ -175,34 +193,297 @@ def extract_llm_response(text, terms, quarter, year):
     except Exception as e:
         st.error(f"LLM extraction failed: {e}")
         return {}
+    
+def map_quarter_to_date(quarter, year):
+    """
+    Maps quarter to specific date ranges and end dates
+    
+    Args:
+        quarter (str): Quarter (Q1, Q2, Q3, Q4)
+        year (int): Fiscal Year
+    
+    Returns:
+        dict: Mapping of quarter to date ranges and end dates
+    """
+    quarter_date_mapping = {
+        "Q1": {
+            "start_date": f"April 1, {year-1}",
+            "end_date": f"June 30, {year-1}",
+            "calendar_end_date": f"June 30, {year-1}"
+        },
+        "Q2": {
+            "start_date": f"July 1, {year-1}",
+            "end_date": f"September 30, {year-1}",
+            "calendar_end_date": f"September 30, {year-1}"
+        },
+        "Q3": {
+            "start_date": f"October 1, {year-1}",
+            "end_date": f"December 31, {year-1}",
+            "calendar_end_date": f"December 31, {year-1}"
+        },
+        "Q4": {
+            "start_date": f"January 1, {year}",
+            "end_date": f"March 31, {year}",
+            "calendar_end_date": f"March 31, {year}"
+        }
+    }
+    return quarter_date_mapping.get(quarter, {})
+
+def correlate_quarter_data(text, quarter, year):
+    """
+    Correlates quarter-based financial data with specific dates
+    
+    Args:
+        text (str): Extracted financial text
+        quarter (str): Quarter (Q1, Q2, Q3, Q4)
+        year (int): Fiscal Year
+    
+    Returns:
+        dict: Correlated financial data with date information
+    """
+    # Get quarter date mapping
+    quarter_dates = map_quarter_to_date(quarter, year)
+    
+    # Extract financial data for the specific quarter
+    financial_data = extract_llm_response(text, 
+                                          ["Revenue", "PAT", "EBITDA"], 
+                                          quarter, 
+                                          year)
+    
+    # Enrich financial data with date information
+    correlated_data = {
+        "Quarter": quarter,
+        "Fiscal Year": f"FY{str(year)[2:]}",
+        "Start Date": quarter_dates.get("start_date", "N/A"),
+        "End Date": quarter_dates.get("end_date", "N/A"),
+        "Calendar End Date": quarter_dates.get("calendar_end_date", "N/A"),
+        **financial_data
+    }
+    
+    return correlated_data
+
+def validate_date_correlation(correlated_data):
+    """
+    Validates the correlation between quarter and dates
+    
+    Args:
+        correlated_data (dict): Correlated financial data
+    
+    Returns:
+        bool: Validation result
+    """
+    required_keys = ["Quarter", "Fiscal Year", "Start Date", "End Date", "Calendar End Date"]
+    return all(key in correlated_data for key in required_keys)
+
+
+def validate_quarter(quarter):
+    """
+    Validate and standardize quarter input
+    """
+    quarter = quarter.upper().strip()
+    valid_quarters = ['Q1', 'Q2', 'Q3', 'Q4']
+    
+    if quarter in valid_quarters:
+        return quarter
+    
+    # Try to match variations
+    quarter_mapping = {
+        '1ST': 'Q1',
+        'FIRST': 'Q1',
+        '2ND': 'Q2',
+        'SECOND': 'Q2',
+        '3RD': 'Q3',
+        'THIRD': 'Q3',
+        '4TH': 'Q4',
+        'FOURTH': 'Q4'
+    }
+    
+    if quarter in quarter_mapping:
+        return quarter_mapping[quarter]
+    
+    # Attempt to parse numeric inputs
+    try:
+        num = int(quarter)
+        if 1 <= num <= 4:
+            return f'Q{num}'
+    except ValueError:
+        pass
+    
+    return None
+
+def intelligent_year_parsing(year_input):
+    """
+    Intelligently parse year input with various formats
+    """
+    try:
+        # Direct integer input
+        year = int(year_input)
+        if 2000 <= year <= 2100:
+            return year
+        
+        # Handle short year formats
+        if len(str(year_input)) == 2:
+            current_century = datetime.datetime.now().year // 100
+            year = int(f"{current_century}{year_input}")
+            return year
+        
+        # Handle fiscal year notation
+        if str(year_input).startswith('FY'):
+            try:
+                return int(year_input[2:]) + 2000
+            except ValueError:
+                return None
+    
+    except (ValueError, TypeError):
+        # Handle text-based inputs
+        year_mapping = {
+            'CURRENT': datetime.datetime.now().year,
+            'PREVIOUS': datetime.datetime.now().year - 1,
+            'LAST': datetime.datetime.now().year - 1
+        }
+        
+        year_input = str(year_input).upper()
+        return year_mapping.get(year_input)
+    
+    return None
 
 def main():
-    st.title("Financial Data Analyzer")
+    st.title("🔍 Intelligent Financial Data Extractor")
 
-    uploaded_file = st.file_uploader("Upload a financial report (PDF)", type=['pdf'])
+    # File Upload
+    uploaded_file = st.file_uploader("Upload Financial Report (PDF)", type=['pdf'])
     
+    # Free-form Input Sections
+    st.subheader("Financial Analysis Parameters")
+    
+    # Quarter Input with Intelligence
+    quarter_input = st.text_input(
+        "Enter Quarter (Q1/Q2/Q3/Q4)", 
+        placeholder="E.g., Q3, 3rd, First Quarter"
+    )
+    
+    # Year Input with Intelligence
+    year_input = st.text_input(
+        "Enter Fiscal Year", 
+        placeholder="E.g., 2024, FY24, Current"
+    )
+    
+    # Financial Terms with Free-form Input
+    terms_input = st.text_input(
+        "Enter Financial Terms (Comma Separated)", 
+        placeholder="E.g., Revenue, Profit, EBITDA, EPS"
+    )
+
+    # Analysis Mode Selection
+    analysis_mode = st.radio(
+        "Select Analysis Mode",
+        ["Basic Extraction", "Detailed Correlation", "Comprehensive Analysis"]
+    )
+
+    # Validation and Processing
     if uploaded_file:
-        with st.spinner("Extracting text..."):
-            text = extract_text_from_pdf(uploaded_file)
-
-        display_text = st.expander("View Extracted Text")
-        display_text.text(text[:5000])  # Show first 5000 characters
-
-        terms = st.text_input("Enter financial terms (comma-separated)", "Revenue, PAT, EBITDA").split(',')
-        terms = [term.strip() for term in terms]
+        # Validate Inputs
+        validated_quarter = validate_quarter(quarter_input)
+        validated_year = intelligent_year_parsing(year_input)
         
-        quarter = st.selectbox("Select Quarter", ["Q1", "Q2", "Q3", "Q4"])
-        year = st.number_input("Enter Fiscal Year", min_value=2000, max_value=2100, value=2025)
+        # Split and clean terms
+        terms = [term.strip() for term in terms_input.split(',') if term.strip()]
+        
+        # Input Validation Checks
+        input_valid = True
+        
+        if not validated_quarter:
+            st.error("Invalid Quarter Input. Please use Q1-Q4 or similar formats.")
+            input_valid = False
+        
+        if not validated_year:
+            st.error("Invalid Year Input. Use numeric year or descriptive terms.")
+            input_valid = False
+        
+        if not terms:
+            st.warning("No financial terms specified. Using default terms.")
+            terms = ["Revenue", "PAT", "EBITDA"]
 
-        if st.button("Analyze"):
-            terms = standardize_financial_terms(terms)
-            results = extract_llm_response(text, terms, quarter, year)
+        # Proceed with Analysis
+        if input_valid and st.button("🚀 Analyze Financial Data"):
+            with st.spinner("Processing Document..."):
+                # Text Extraction
+                text = extract_text_from_pdf(uploaded_file)
+                
+                # Standardize Terms
+                standardized_terms = standardize_financial_terms(terms)
 
-            if results:
-                df = pd.DataFrame(list(results.items()), columns=['Term', 'Value'])
-                st.table(df)
-            else:
-                st.warning("No relevant data found.")
+                # Conditional Analysis
+                if analysis_mode == "Basic Extraction":
+                    results = extract_llm_response(
+                        text, 
+                        standardized_terms, 
+                        validated_quarter, 
+                        validated_year
+                    )
+                    
+                    if results:
+                        df = pd.DataFrame(list(results.items()), columns=['Term', 'Value'])
+                        st.table(df)
+                    else:
+                        st.warning("No relevant data found.")
+
+                elif analysis_mode == "Detailed Correlation":
+                    correlated_data = correlate_quarter_data(
+                        text, 
+                        validated_quarter, 
+                        validated_year
+                    )
+                    
+                    if validate_date_correlation(correlated_data):
+                        correlation_df = pd.DataFrame.from_dict(
+                            correlated_data, 
+                            orient='index', 
+                            columns=['Value']
+                        )
+                        st.table(correlation_df)
+                    else:
+                        st.warning("Correlation incomplete.")
+
+                elif analysis_mode == "Comprehensive Analysis":
+                    # Combine extraction methods
+                    results = extract_llm_response(
+                        text, 
+                        standardized_terms, 
+                        validated_quarter, 
+                        validated_year
+                    )
+                    
+                    correlated_data = correlate_quarter_data(
+                        text, 
+                        validated_quarter, 
+                        validated_year
+                    )
+                    
+                    # Display comprehensive results
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Financial Metrics")
+                        results_df = pd.DataFrame(list(results.items()), columns=['Term', 'Value'])
+                        st.table(results_df)
+                    
+                    with col2:
+                        st.subheader("Date Correlation")
+                        correlation_df = pd.DataFrame.from_dict(
+                            correlated_data, 
+                            orient='index', 
+                            columns=['Value']
+                        )
+                        st.table(correlation_df)
+
+    # Helper Information
+    st.sidebar.info("""
+    💡 Intelligent Input Tips:
+    - Quarter: Q1, 1st, First Quarter
+    - Year: 2024, FY24, Current
+    - Terms: Revenue, Profit, Multiple terms supported
+    """)
 
 if __name__ == "__main__":
     main()
