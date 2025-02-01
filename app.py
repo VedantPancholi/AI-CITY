@@ -118,7 +118,7 @@ class FinancialDataExtractor:
             5. Market-related figures
             6. Any other relevant financial data
             
-            Format your response as a clear markdown list, grouping similar items together.
+            Format your response as a clear tabular list, grouping similar items together.
             Each data point should include its full context and any relevant time period or date.
             
             Text to analyze:
