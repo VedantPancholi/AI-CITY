@@ -95,6 +95,8 @@ Create a `config.json` file in the project root:
 }
 ```
 
+
+
 ### **6. Run the Application**  
 ```bash
 streamlit run app.py
